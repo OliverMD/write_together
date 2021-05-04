@@ -13,12 +13,12 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use tokio_stream::StreamExt;
-use tui::backend::CrosstermBackend;
+use tui::backend::{Backend, CrosstermBackend};
 use tui::layout::{Alignment, Constraint, Direction, Layout};
 use tui::style::{Color, Style};
 use tui::text::{Span, Text};
 use tui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
-use tui::Terminal;
+use tui::{Frame, Terminal};
 
 mod app;
 mod sessions;
@@ -74,84 +74,20 @@ pub async fn main() {
 
     let mut app = App::new(ui_rx, app_tx, opts.port);
 
-    let app_task = tokio::task::spawn(async move { app.run().await });
+    tokio::task::spawn(async move { app.run().await });
 
-    let mut content_buffer = Vec::new();
-    let mut input_buffer = Vec::new();
-    let mut address_buffer = Vec::new();
-    let mut log_buffer = Vec::new();
-    let mut selected_element = Element::Connect;
-
-    let mut can_input = false;
+    let mut view_state = ViewState::new();
 
     loop {
-        terminal
-            .draw(|f| {
-                let size = f.size();
-
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .margin(2)
-                    .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
-                    .split(size);
-
-                let para = Paragraph::new(content_buffer.join(" "))
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_type(BorderType::Rounded)
-                            .title("Content"),
-                    )
-                    .wrap(Wrap { trim: false });
-
-                f.render_widget(para, chunks[0]);
-
-                let bottom_chunks = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
-                    .split(chunks[1]);
-
-                let input_para = Paragraph::new(String::from_iter(&input_buffer))
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_type(BorderType::Rounded)
-                            .style(get_style(Element::Input, selected_element))
-                            .title("Input"),
-                    )
-                    .wrap(Wrap { trim: false });
-                f.render_widget(input_para, bottom_chunks[0]);
-
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(3), Constraint::Min(1)])
-                    .split(bottom_chunks[1]);
-
-                let address_input = Paragraph::new(String::from_iter(&address_buffer))
-                    .block(
-                        Block::default()
-                            .title("Connect")
-                            .borders(Borders::ALL)
-                            .style(get_style(Element::Connect, selected_element))
-                            .border_type(BorderType::Plain),
-                    )
-                    .alignment(Alignment::Center);
-
-                f.render_widget(address_input, chunks[0]);
-                let log_block =
-                    Paragraph::new(log_buffer.join("\n")).block(Block::default().title("Log"));
-
-                f.render_widget(log_block, chunks[1]);
-            })
-            .unwrap();
+        terminal.draw(|frame| view(frame, &view_state)).unwrap();
 
         tokio::select! {
             Some(message) = app_rx.recv() => {
                 match message {
-                    AppMessages::Log(msg) => log_buffer.push(msg),
-                    AppMessages::MoreInput(input) => content_buffer.push(input),
-                    AppMessages::OurTurn => can_input = true,
-                    AppMessages::NotOurTurn => can_input = false,
+                    AppMessages::Log(msg) => view_state.log_buffer.push(msg),
+                    AppMessages::MoreInput(input) => view_state.content_buffer.push(input),
+                    AppMessages::OurTurn => view_state.can_input = true,
+                    AppMessages::NotOurTurn => view_state.can_input = false,
                 }
             }
             Some(action) = rx.recv() => {
@@ -159,15 +95,15 @@ pub async fn main() {
                     InputAction::Quit => break,
                     InputAction::Key(keycode) => match keycode {
                         KeyCode::Backspace => {
-                            match selected_element {
-                                Element::Input => input_buffer.pop(),
-                                Element::Connect => address_buffer.pop(),
+                            match view_state.selected_element {
+                                Element::Input => view_state.input_buffer.pop(),
+                                Element::Connect => view_state.address_buffer.pop(),
                             };
                         }
                         KeyCode::Enter => {
-                            if selected_element == Element::Connect {
+                            if view_state.selected_element == Element::Connect {
                                 let address =
-                                    SocketAddr::from_str(String::from_iter(&address_buffer).as_str());
+                                    SocketAddr::from_str(String::from_iter(&view_state.address_buffer).as_str());
 
                                 if let Ok(address) = address {
                                     ui_tx.send(AppCommands::Connect(address)).await;
@@ -175,26 +111,26 @@ pub async fn main() {
                             }
                         }
                         KeyCode::Left => {
-                            if selected_element == Element::Connect {
-                                selected_element = Element::Input
+                            if view_state.selected_element == Element::Connect {
+                                view_state.selected_element = Element::Input
                             }
                         }
                         KeyCode::Right => {
-                            if selected_element == Element::Input {
-                                selected_element = Element::Connect;
+                            if view_state.selected_element == Element::Input {
+                                view_state.selected_element = Element::Connect;
                             }
                         }
-                        KeyCode::Char(c) => match selected_element {
+                        KeyCode::Char(c) => match view_state.selected_element {
                             Element::Input => {
-                                if can_input {
-                                    input_buffer.push(c);
+                                if view_state.can_input {
+                                    view_state.input_buffer.push(c);
                                     if c == '.' {
-                                        ui_tx.send(AppCommands::Input(String::from_iter(&input_buffer))).await;
-                                        input_buffer.clear();
+                                        ui_tx.send(AppCommands::Input(String::from_iter(&view_state.input_buffer))).await;
+                                        view_state.input_buffer.clear();
                                     }
                                 }
                             },
-                            Element::Connect => address_buffer.push(c),
+                            Element::Connect => view_state.address_buffer.push(c),
                         },
                         _ => {}
                     },
@@ -205,6 +141,87 @@ pub async fn main() {
 
     disable_raw_mode().unwrap();
     terminal.clear().unwrap();
+}
+
+struct ViewState {
+    content_buffer: Vec<String>,
+    input_buffer: Vec<char>,
+    address_buffer: Vec<char>,
+    log_buffer: Vec<String>,
+    selected_element: Element,
+
+    can_input: bool,
+}
+
+impl ViewState {
+    fn new() -> ViewState {
+        ViewState {
+            content_buffer: Vec::new(),
+            input_buffer: Vec::new(),
+            address_buffer: Vec::new(),
+            log_buffer: Vec::new(),
+            selected_element: Element::Input,
+            can_input: false,
+        }
+    }
+}
+
+fn view<B: Backend>(frame: &mut Frame<B>, state: &ViewState) {
+    let size = frame.size();
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
+        .split(size);
+
+    let para = Paragraph::new(state.content_buffer.join(" "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title("Content"),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(para, chunks[0]);
+
+    let bottom_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
+        .split(chunks[1]);
+
+    let input_para = Paragraph::new(String::from_iter(&state.input_buffer))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .style(get_style(Element::Input, state.selected_element))
+                .title("Input"),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(input_para, bottom_chunks[0]);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(bottom_chunks[1]);
+
+    let address_input = Paragraph::new(String::from_iter(&state.address_buffer))
+        .block(
+            Block::default()
+                .title("Connect")
+                .borders(Borders::ALL)
+                .style(get_style(Element::Connect, state.selected_element))
+                .border_type(BorderType::Plain),
+        )
+        .alignment(Alignment::Center);
+
+    frame.render_widget(address_input, chunks[0]);
+    let log_block =
+        Paragraph::new(state.log_buffer.join("\n")).block(Block::default().title("Log"));
+
+    frame.render_widget(log_block, chunks[1])
 }
 
 fn get_style(this_element: Element, selected_element: Element) -> Style {
