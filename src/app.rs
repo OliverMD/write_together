@@ -1,11 +1,16 @@
-use crate::error::Error;
-use crate::UIOutput;
-use std::fmt::{Display, Formatter};
-use std::net::{IpAddr, SocketAddr};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::{Receiver, Sender};
+use crate::{error::Error, UIOutput};
+use std::{
+    fmt::{Display, Formatter},
+    net::{IpAddr, SocketAddr},
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::{
+        mpsc,
+        mpsc::{Receiver, Sender},
+    },
+};
 
 // Messages from the app that should be handled by the UI.
 #[derive(Debug)]

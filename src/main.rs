@@ -1,21 +1,29 @@
 use std::io;
 
-use crate::app::{App, AppMessages};
-use crate::error::Error;
+use crate::{
+    app::{App, AppMessages},
+    error::Error,
+};
 use clap::Clap;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use std::fmt::{Display, Formatter};
-use std::iter::FromIterator;
-use std::net::SocketAddr;
-use std::str::FromStr;
+use crossterm::{
+    event::{Event, EventStream, KeyCode, KeyEvent},
+    terminal::{disable_raw_mode, enable_raw_mode},
+};
+use std::{
+    fmt::{Display, Formatter},
+    iter::FromIterator,
+    net::SocketAddr,
+    str::FromStr,
+};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
-use tui::backend::{Backend, CrosstermBackend};
-use tui::layout::{Alignment, Constraint, Direction, Layout};
-use tui::style::{Color, Style};
-use tui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
-use tui::{Frame, Terminal};
+use tui::{
+    backend::{Backend, CrosstermBackend},
+    layout::{Alignment, Constraint, Direction, Layout},
+    style::{Color, Style},
+    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
+    Frame, Terminal,
+};
 
 mod app;
 mod error;
