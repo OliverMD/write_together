@@ -1,33 +1,24 @@
-use std::{io, thread};
+use std::io;
 
-use crate::app::{App, AppCommands, AppMessages};
+use crate::app::{App, AppMessages};
+use crate::error::Error;
 use clap::Clap;
-use crossterm::event::{Event, EventStream, KeyCode};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use futures::FutureExt;
-use itertools::Itertools;
+use std::fmt::{Display, Formatter};
 use std::iter::FromIterator;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tokio::time::{Duration, Instant};
 use tokio_stream::StreamExt;
 use tui::backend::{Backend, CrosstermBackend};
 use tui::layout::{Alignment, Constraint, Direction, Layout};
 use tui::style::{Color, Style};
-use tui::text::{Span, Text};
 use tui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use tui::{Frame, Terminal};
 
 mod app;
-mod sessions;
-
-#[derive(Debug)]
-enum InputAction {
-    Quit,
-    Key(KeyCode),
-}
+mod error;
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 enum Element {
@@ -41,8 +32,24 @@ struct Opts {
     port: u16,
 }
 
+// Events emanating from UI that need to be handled by the app
+#[derive(Debug)]
+pub(crate) enum UIOutput {
+    Connect(SocketAddr),
+    Input(String),
+}
+
+impl Display for UIOutput {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UIOutput::Connect(_) => write!(f, "Connect"),
+            UIOutput::Input(_) => write!(f, "Input"),
+        }
+    }
+}
+
 #[tokio::main]
-pub async fn main() {
+pub async fn main() -> Result<(), Error> {
     let opts = Opts::parse();
 
     let stdout = io::stdout();
@@ -51,30 +58,15 @@ pub async fn main() {
     enable_raw_mode().unwrap();
     terminal.clear().unwrap();
 
-    let (tx, mut rx) = mpsc::channel(32);
-    let (ui_tx, mut ui_rx) = mpsc::channel::<AppCommands>(32);
-    let (app_tx, mut app_rx) = mpsc::channel::<AppMessages>(32);
+    let (ui_tx, ui_rx) = mpsc::channel::<UIOutput>(32);
     let mut reader = EventStream::new();
 
-    // Local IO task
-    let input_task = tokio::task::spawn(async move {
-        loop {
-            let mut event = reader.next().await;
-            if let Some(Ok(event)) = event {
-                if event == Event::Key(KeyCode::Esc.into()) {
-                    tx.send(InputAction::Quit).await;
-                }
+    let (mut app, mut app_rx) = App::new(ui_rx, opts.port);
 
-                if let Event::Key(event) = event {
-                    tx.send(InputAction::Key(event.code)).await;
-                }
-            }
-        }
+    tokio::task::spawn(async move {
+        app.run().await?;
+        Ok::<(), Error>(())
     });
-
-    let mut app = App::new(ui_rx, app_tx, opts.port);
-
-    tokio::task::spawn(async move { app.run().await });
 
     let mut view_state = ViewState::new();
 
@@ -90,10 +82,10 @@ pub async fn main() {
                     AppMessages::NotOurTurn => view_state.can_input = false,
                 }
             }
-            Some(action) = rx.recv() => {
-                match action {
-                    InputAction::Quit => break,
-                    InputAction::Key(keycode) => match keycode {
+            Some(Ok(event)) = reader.next() => {
+                match event {
+                    Event::Key(KeyEvent {code: KeyCode::Esc, ..}) => break,
+                    Event::Key(KeyEvent {code, ..}) => match code {
                         KeyCode::Backspace => {
                             match view_state.selected_element {
                                 Element::Input => view_state.input_buffer.pop(),
@@ -106,7 +98,7 @@ pub async fn main() {
                                     SocketAddr::from_str(String::from_iter(&view_state.address_buffer).as_str());
 
                                 if let Ok(address) = address {
-                                    ui_tx.send(AppCommands::Connect(address)).await;
+                                    ui_tx.send(UIOutput::Connect(address)).await?;
                                 }
                             }
                         }
@@ -125,7 +117,7 @@ pub async fn main() {
                                 if view_state.can_input {
                                     view_state.input_buffer.push(c);
                                     if c == '.' {
-                                        ui_tx.send(AppCommands::Input(String::from_iter(&view_state.input_buffer))).await;
+                                        ui_tx.send(UIOutput::Input(String::from_iter(&view_state.input_buffer))).await?;
                                         view_state.input_buffer.clear();
                                     }
                                 }
@@ -134,6 +126,7 @@ pub async fn main() {
                         },
                         _ => {}
                     },
+                    _ => {}
                 }
             }
         }
@@ -141,13 +134,16 @@ pub async fn main() {
 
     disable_raw_mode().unwrap();
     terminal.clear().unwrap();
+
+    Ok(())
 }
 
 struct ViewState {
     content_buffer: Vec<String>,
+    log_buffer: Vec<String>,
+
     input_buffer: Vec<char>,
     address_buffer: Vec<char>,
-    log_buffer: Vec<String>,
     selected_element: Element,
 
     can_input: bool,
