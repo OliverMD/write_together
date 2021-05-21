@@ -1,4 +1,4 @@
-use crate::{error::Error, UIOutput};
+use crate::{error::Error, ui_actor::UIHandle};
 use std::{
     fmt::{Display, Formatter},
     net::{IpAddr, SocketAddr},
@@ -12,22 +12,17 @@ use tokio::{
     },
 };
 
-// Messages from the app that should be handled by the UI.
 #[derive(Debug)]
-pub(crate) enum AppMessages {
-    Log(String),
-    MoreInput(String),
-    OurTurn,
-    NotOurTurn,
+pub(crate) enum AppInput {
+    Connect(SocketAddr),
+    Input(String),
 }
 
-impl Display for AppMessages {
+impl Display for AppInput {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            AppMessages::Log(_) => write!(f, "Log"),
-            AppMessages::MoreInput(_) => write!(f, "MoreInput"),
-            AppMessages::OurTurn => write!(f, "OurTurn"),
-            AppMessages::NotOurTurn => write!(f, "NotOurTurn"),
+            AppInput::Connect(_) => write!(f, "Connect"),
+            AppInput::Input(_) => write!(f, "Input"),
         }
     }
 }
@@ -39,91 +34,130 @@ enum State {
 }
 
 #[derive(Debug)]
-pub(crate) struct App {
-    ui_rx: Receiver<UIOutput>,
-    app_tx: Sender<AppMessages>,
+struct App {
+    ui_handle: UIHandle,
     state: State,
     listen_port: u16,
 }
 
 impl App {
-    pub(crate) fn new(ui_rx: Receiver<UIOutput>, listen_port: u16) -> (App, Receiver<AppMessages>) {
-        let (app_tx, app_rx) = mpsc::channel::<AppMessages>(32);
-
-        return (
-            App {
-                ui_rx,
-                app_tx,
-                state: State::Waiting,
-                listen_port,
-            },
-            app_rx,
-        );
+    fn new(ui_handle: UIHandle, listen_port: u16) -> Self {
+        Self {
+            ui_handle,
+            state: State::Waiting,
+            listen_port,
+        }
     }
 
-    pub(crate) async fn run(&mut self) -> Result<(), Error> {
-        let listener = TcpListener::bind(SocketAddr::new(
-            IpAddr::from([127, 0, 0, 1]),
-            self.listen_port,
-        ))
-        .await?;
-
-        loop {
-            match &mut self.state {
+    async fn handle_message(&mut self, msg: AppInput) -> Result<(), Error> {
+        match msg {
+            AppInput::Connect(address) => match self.state {
                 State::Waiting => {
-                    tokio::select! {
-                        Ok((socket, remote)) = listener.accept() => {
-                            self.app_tx.send(AppMessages::Log(format!("Connected to {:?}", remote))).await?;
-                            self.state = State::Connected(socket);
-                            self.app_tx.send(AppMessages::OurTurn).await?;
-                            // Someone trying to connect after this point could time out
-                        }
-                        Some(cmd) = self.ui_rx.recv() => {
-                            match cmd {
-                                UIOutput::Connect(addr) => {
-                                    self.app_tx.send(AppMessages::Log(format!("Attempting to connect to {:?}", addr))).await?;
-                                    let socket = TcpStream::connect(addr).await?;
-                                    self.state = State::Connected(socket);
-                                    self.app_tx.send(AppMessages::Log(format!("Connected to remote {:?}", addr))).await?;
-                                }
-                                UIOutput::Input(_) => {
-                                    self.app_tx.send(AppMessages::Log("ERROR: Unexpected input".to_string())).await?;
-                                }
-                            }
-                        }
-                        else => {
-                            return Ok(());
-                        }
-                    }
+                    self.ui_handle
+                        .log(format!("Attempting to connect to {:?}", address))
+                        .await?;
+                    let socket = TcpStream::connect(address).await?;
+                    self.state = State::Connected(socket);
+                    self.ui_handle.connected(true).await?;
+                    self.ui_handle
+                        .log(format!("Connected to remote {:?}", address))
+                        .await?;
+                }
+                State::Connected(_) => {}
+            },
+            AppInput::Input(input) => match &mut self.state {
+                State::Waiting => {
+                    self.ui_handle
+                        .log("ERROR: Unexpected input".to_string())
+                        .await?;
                 }
                 State::Connected(stream) => {
-                    let mut buf = vec![0; 1024];
-                    tokio::select! {
-                        Ok(result) = stream.read(&mut buf) => {
-                            if result > 0 {
-                                self.app_tx.send(AppMessages::Log(format!("{:?}", &buf.as_slice()[..result]))).await?;
-                                self.app_tx.send(AppMessages::MoreInput(String::from_utf8(buf).unwrap())).await?;
-                                self.app_tx.send(AppMessages::OurTurn).await?;
-                            } else {
-                                // Socket closed
-                                self.state = State::Waiting;
-                            }
-                        }
-                        Some(cmd) = self.ui_rx.recv() => {
-                            match cmd {
-                                UIOutput::Input(input) => {
-                                    stream.write_all(input.as_bytes()).await?;
-                                    self.app_tx.send(AppMessages::MoreInput(input)).await?;
-                                    self.app_tx.send(AppMessages::NotOurTurn).await?;
-                                }
-                                _ => {
-                                    self.app_tx.send(AppMessages::Log("Unexpected Command".to_string())).await?;
-                                }
-                            }
-                        }
-                    }
+                    stream.write_all(input.as_bytes()).await?;
                 }
+            },
+        }
+        Ok(())
+    }
+
+    async fn process_remote(&mut self) -> Result<(), Error> {
+        if let State::Connected(stream) = &mut self.state {
+            let mut buf = vec![0; 1024];
+            let result = stream.read(&mut buf).await?;
+            if result > 0 {
+                self.ui_handle
+                    .log(format!("{:?}", &buf.as_slice()[..result]))
+                    .await?;
+                self.ui_handle
+                    .turn_received(String::from_utf8(buf).unwrap())
+                    .await?;
+            } else {
+                self.state = State::Waiting;
+                self.ui_handle.disconnected().await?;
             }
         }
+        Ok(())
+    }
+
+    async fn accept(&mut self, mut stream: TcpStream) -> Result<(), Error> {
+        if matches!(self.state, State::Waiting) {
+            self.state = State::Connected(stream);
+            self.ui_handle.connected(false).await?;
+        } else {
+            stream.shutdown().await?;
+        }
+        Ok(())
+    }
+}
+
+async fn run_app(mut app: App, mut receiver: Receiver<AppInput>) -> Result<(), Error> {
+    let listener = TcpListener::bind(SocketAddr::new(
+        IpAddr::from([127, 0, 0, 1]),
+        app.listen_port,
+    ))
+    .await?;
+
+    app.ui_handle
+        .log(String::from("Bound to localhost"))
+        .await?;
+
+    loop {
+        tokio::select! {
+            Ok((socket, _addr)) = listener.accept() => {
+                app.accept(socket).await?;
+            }
+            msg = receiver.recv() => {
+                if let Some(msg) = msg {
+                    app.handle_message(msg).await?;
+                } else {
+                    // Lost connection to the ui actor so we should die
+                    break Ok(());
+                }
+            }
+            Ok(_) = app.process_remote() => {}
+            else => break Ok(()),
+        }
+    }
+}
+
+pub struct AppHandle {
+    sender: Sender<AppInput>,
+}
+
+impl AppHandle {
+    pub fn new(listen_port: u16, ui_handle: UIHandle) -> Self {
+        let (sender, receiver) = mpsc::channel(8);
+        let app = App::new(ui_handle, listen_port);
+        tokio::spawn(run_app(app, receiver));
+        Self { sender }
+    }
+
+    pub async fn send_sentence(&self, sentence: String) -> Result<(), Error> {
+        self.sender.send(AppInput::Input(sentence)).await?;
+        Ok(())
+    }
+
+    pub async fn connect(&self, address: SocketAddr) -> Result<(), Error> {
+        self.sender.send(AppInput::Connect(address)).await?;
+        Ok(())
     }
 }
