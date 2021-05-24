@@ -114,6 +114,7 @@ impl UIActor {
                 }
             }
             UIMessage::Connected(is_our_turn) => {
+                self.log_buffer.push(String::from("Accepted remote connection"));
                 self.app_state = InSession {
                     is_our_turn,
                     content_log: Vec::new(),
@@ -134,6 +135,18 @@ impl UIActor {
                         Element::Connect => self.address_buffer.pop(),
                     };
                     Some(false)
+                }
+                KeyCode::Left => {
+                    if self.selected_element == Element::Connect {
+                        self.selected_element = Element::Input;
+                    }
+                    None
+                }
+                KeyCode::Right => {
+                    if self.selected_element == Element::Input {
+                        self.selected_element = Element::Connect;
+                    }
+                    None
                 }
                 _ => None,
             }
@@ -164,6 +177,8 @@ impl UIActor {
                                 .send_sentence(String::from_iter(&self.input_buffer))
                                 .await?;
                             content_log.push(String::from_iter(&self.input_buffer));
+                            *is_our_turn = false;
+                            self.input_buffer.clear();
                         }
                     }
                 }
@@ -180,16 +195,6 @@ impl UIActor {
                                 if let Ok(address) = address {
                                     self.app_handle.connect(address).await?;
                                 }
-                            }
-                        }
-                        KeyCode::Left => {
-                            if self.selected_element == Element::Connect {
-                                self.selected_element = Element::Input
-                            }
-                        }
-                        KeyCode::Right => {
-                            if self.selected_element == Element::Input {
-                                self.selected_element = Element::Connect;
                             }
                         }
                         KeyCode::Char(c) => {
