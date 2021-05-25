@@ -4,6 +4,7 @@ use crate::{
     ui_actor::AppState::{InSession, Waiting},
 };
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
+use itertools::Itertools;
 use std::{
     fmt::{Display, Formatter},
     iter::FromIterator,
@@ -114,7 +115,6 @@ impl UIActor {
                 }
             }
             UIMessage::Connected(is_our_turn) => {
-                self.log_buffer.push(String::from("Accepted remote connection"));
                 self.app_state = InSession {
                     is_our_turn,
                     content_log: Vec::new(),
@@ -268,8 +268,12 @@ impl UIActor {
             .alignment(Alignment::Center);
 
         frame.render_widget(address_input, chunks[0]);
-        let log_block =
-            Paragraph::new(self.log_buffer.join("\n")).block(Block::default().title("Log"));
+        let log_block = Paragraph::new(self.log_buffer.iter().rev().join("\n")).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title("Log"),
+        );
 
         frame.render_widget(log_block, chunks[1])
     }
@@ -338,7 +342,7 @@ impl UIHandle {
         Ok(())
     }
 
-    pub async fn turn_received(&self, new_sentence: String) -> Result<(), Error> {
+    pub async fn sentence_received(&self, new_sentence: String) -> Result<(), Error> {
         self.sender
             .send(UIMessage::SentenceReceived(new_sentence))
             .await?;
